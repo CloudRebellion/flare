@@ -9,7 +9,7 @@
 # matching atomicsite's analyticsdb build.
 
 # Stage 1: SvelteKit dashboard.
-FROM oven/bun:1-alpine AS frontend
+FROM oven/bun:1.3.9-alpine@sha256:9028ee7a60a04777190f0c3129ce49c73384d3fc918f3e5c75f5af188e431981 AS frontend
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache \
@@ -53,9 +53,24 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w -X main.Version=${FLARE_RELEASE} -X main.Commit=${FLARE_COMMIT}" -o /flare ./cmd/server
 
+# Build-only helpers use the SAME module, embedded DuckDB and CGO toolchain.
+# Signed official extensions are installed while build egress exists, then
+# qualified with the final image on an internal-only network.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=1 GOOS=linux go build -o /duckdb-cache-installer ./cmd/duckdb-cache \
+    && CGO_ENABLED=1 GOOS=linux go test -tags=imagequalification -c -o /image-qualification.test ./internal/analytics \
+    && go version -m /flare > /go-buildinfo.txt \
+    && sha256sum /flare > /flare.sha256
+RUN /duckdb-cache-installer --directory /duckdb-cache --manifest /duckdb-cache-manifest.json
+
+# CI extracts these build-only files; neither tool binary enters the runtime.
+FROM scratch AS image-qualification-tools
+COPY --from=backend /image-qualification.test /go-buildinfo.txt /flare.sha256 /
+
 # Stage 3: runtime (debian-slim for glibc + libstdc++, which the duckdb static
 # lib needs at runtime).
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 ARG FLARE_RELEASE=v0.6.7
 ARG FLARE_COMMIT=""
 LABEL org.opencontainers.image.version="${FLARE_RELEASE}" \
@@ -68,9 +83,11 @@ RUN apt-get update -qq \
     && groupadd -g 1000 flare && useradd -u 1000 -g flare -m -d /app flare \
     && mkdir -p /app/data/parquet && chown -R flare:flare /app
 COPY --from=backend /flare /usr/local/bin/flare
+COPY --from=backend --chown=1000:1000 /duckdb-cache /app/.duckdb/extensions
+COPY --from=backend /duckdb-cache-manifest.json /app/duckdb-cache-manifest.json
 COPY --from=frontend /app/frontend/build-manifest.json /app/browser-build-manifest.json
 USER flare
-ENV FLARE_PARQUET_DIR=/app/data/parquet
+ENV HOME=/app FLARE_PARQUET_DIR=/app/data/parquet
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/livez || exit 1
