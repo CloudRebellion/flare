@@ -58,3 +58,10 @@ authorize a production change or grant release approval.
 Failures emit only a fixed reason code and phase, never exception text or
 container environment. Confirmed created CIDs enter cleanup custody before
 inspection; cleanup still requires the exact image and ownership label.
+
+The build-only cache installer bootstraps `httpfs` with Go's HTTPS client from
+`extensions.duckdb.org` for the embedded DuckDB version/platform. It bounds both
+the compressed download and decompressed file, rejects HTTPS downgrades and
+foreign redirects, then requires DuckDB's signed local INSTALL/LOAD before the
+remaining HTTPS extension installation. This avoids needing `httpfs` to download
+itself. Unsigned extensions remain disabled.

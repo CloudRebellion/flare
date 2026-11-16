@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -12,9 +14,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	_ "github.com/marcboeker/go-duckdb/v2"
@@ -25,7 +30,7 @@ func main() {
 	manifest := flag.String("manifest", "", "new public SHA manifest")
 	flag.Parse()
 	if err := install(*dir, *manifest); err != nil {
-		fmt.Fprintln(os.Stderr, "duckdb-cache: qualification failed")
+		fmt.Fprintf(os.Stderr, "duckdb-cache: %.160s\n", err.Error())
 		os.Exit(1)
 	}
 }
@@ -50,14 +55,6 @@ func install(dir, manifest string) error {
 	if err = db.QueryRowContext(ctx, "SELECT current_setting('allow_unsigned_extensions')").Scan(&unsigned); err != nil || unsigned {
 		return fmt.Errorf("unsigned extensions must be disabled")
 	}
-	for _, ext := range []string{"postgres", "httpfs"} {
-		if _, err = db.ExecContext(ctx, "INSTALL "+ext+" FROM 'https://extensions.duckdb.org'"); err != nil {
-			return err
-		}
-		if _, err = db.ExecContext(ctx, "LOAD "+ext); err != nil {
-			return err
-		}
-	}
 	var version, platform string
 	if err = db.QueryRowContext(ctx, "SELECT version()").Scan(&version); err != nil {
 		return err
@@ -67,6 +64,30 @@ func install(dir, manifest string) error {
 	}
 	if platform != "linux_amd64" && platform != "linux_amd64_gcc4" {
 		return fmt.Errorf("unexpected DuckDB platform")
+	}
+	// HTTPS extension downloads themselves require httpfs. Bootstrap its signed
+	// file with Go's HTTPS client, then let the embedded DuckDB verify/install it.
+	staging, err := os.MkdirTemp(filepath.Dir(dir), ".duckdb-bootstrap-")
+	if err != nil {
+		return fmt.Errorf("bootstrap staging failed")
+	}
+	defer os.RemoveAll(staging)
+	local := filepath.Join(staging, "httpfs.duckdb_extension")
+	if err = downloadHTTPFS(ctx, version, platform, local); err != nil {
+		return err
+	}
+	quoted := strings.ReplaceAll(local, "'", "''")
+	if _, err = db.ExecContext(ctx, "INSTALL '"+quoted+"'"); err != nil {
+		return fmt.Errorf("signed local httpfs install failed")
+	}
+	if _, err = db.ExecContext(ctx, "LOAD httpfs"); err != nil {
+		return fmt.Errorf("signed local httpfs load failed")
+	}
+	if _, err = db.ExecContext(ctx, "INSTALL postgres FROM 'https://extensions.duckdb.org'"); err != nil {
+		return fmt.Errorf("official postgres HTTPS install failed")
+	}
+	if _, err = db.ExecContext(ctx, "LOAD postgres"); err != nil {
+		return fmt.Errorf("signed postgres load failed")
 	}
 	type file struct {
 		Path   string `json:"path"`
@@ -132,4 +153,61 @@ func install(dir, manifest string) error {
 		return err
 	}
 	return closeErr
+}
+
+// Bootstrap only this fixed official extension. No HTTP downgrade, unsigned
+// mode, arbitrary repository, provider credential or runtime egress is added.
+func downloadHTTPFS(ctx context.Context, version, platform, destination string) error {
+	if !regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(version) ||
+		(platform != "linux_amd64" && platform != "linux_amd64_gcc4") {
+		return fmt.Errorf("unexpected bootstrap identity")
+	}
+	client := &http.Client{Timeout: 90 * time.Second, CheckRedirect: officialRedirect}
+	rawURL := "https://extensions.duckdb.org/" + version + "/" + platform + "/httpfs.duckdb_extension.gz"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return fmt.Errorf("bootstrap request failed")
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("official httpfs HTTPS download failed")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("official httpfs response status %d", response.StatusCode)
+	}
+	if err = unpackExtension(response.Body, destination, 32<<20, 64<<20); err != nil {
+		return fmt.Errorf("bounded httpfs decompression failed")
+	}
+	return nil
+}
+
+func officialRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 3 || req.URL.Scheme != "https" || req.URL.Host != "extensions.duckdb.org" || req.URL.User != nil {
+		return fmt.Errorf("bootstrap redirect refused")
+	}
+	return nil
+}
+
+func unpackExtension(source io.Reader, destination string, compressedLimit, expandedLimit int64) error {
+	// Limit the compressed and expanded representations independently.
+	compressed, err := io.ReadAll(io.LimitReader(source, compressedLimit+1))
+	if err != nil || int64(len(compressed)) > compressedLimit {
+		return fmt.Errorf("compressed bound")
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
+		return err
+	}
+	n, copyErr := io.Copy(output, io.LimitReader(reader, expandedLimit+1))
+	closeErr := output.Close()
+	if copyErr != nil || closeErr != nil || n == 0 || n > expandedLimit {
+		return fmt.Errorf("expanded bound or invalid gzip")
+	}
+	return nil
 }
