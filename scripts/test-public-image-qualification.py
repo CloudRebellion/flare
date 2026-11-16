@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Control regressions only. These never claim Docker/native qualification."""
+import contextlib
 import importlib.util
 import io
 import pathlib
@@ -89,10 +90,10 @@ class Controls(unittest.TestCase):
             def transport(args, **kwargs):
                 self.assertEqual(args[:5], ["docker", "exec", "--interactive", "--user=1000:1000", "owned"])
                 self.assertEqual(args[5:7], ["/bin/sh", "-ceu"])
-                script = args[7].replace("/tmp/image-qualification.test", shlex.quote(str(target)))
+                script = args[7].replace("/run/image-qualification/image-qualification.test", shlex.quote(str(target)))
                 return original(["/bin/sh", "-ceu", script], **kwargs)
             def installed_hash(args):
-                return (GATE.digest(target.read_bytes())+"  /tmp/image-qualification.test\n").encode()
+                return (GATE.digest(target.read_bytes())+"  /run/image-qualification/image-qualification.test\n").encode()
             with mock.patch.object(GATE.subprocess, "run", side_effect=transport), mock.patch.object(GATE, "run", side_effect=installed_hash):
                 GATE.copy_image_test("owned", source)
             self.assertEqual(target.read_bytes(), raw)
@@ -100,6 +101,29 @@ class Controls(unittest.TestCase):
             with mock.patch.object(GATE.subprocess, "run", side_effect=transport), mock.patch.object(GATE, "run", return_value=b"wrong  path"):
                 with self.assertRaisesRegex(RuntimeError, "IMAGE_TEST_HASH"):
                     GATE.copy_image_test("owned", source)
+
+    def test_image_smoke_failure_logs_only_fixed_messages(self):
+        output = io.StringIO()
+        fake = subprocess.CompletedProcess([], 1,
+            b"    image_qualification_test.go:10: actual cold exporter failed\n    image_qualification_test.go:11: postgres://private-secret\n",
+            b"private-container-secret")
+        with mock.patch.object(GATE.subprocess,"run",return_value=fake), contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(RuntimeError,"IMAGE_TEST_FAILED"):
+                GATE.required_image_smoke(["synthetic"],2)
+        self.assertIn("actual cold exporter failed",output.getvalue())
+        self.assertNotIn("private-secret",output.getvalue())
+        self.assertNotIn("private-container-secret",output.getvalue())
+        denied = subprocess.CompletedProcess([],126,b"",b"permission denied: private-path")
+        with mock.patch.object(GATE.subprocess,"run",return_value=denied), contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(RuntimeError,"IMAGE_TEST_EXECUTION_DENIED"):
+                GATE.required_image_smoke(["synthetic"],2)
+        self.assertNotIn("private-path",output.getvalue())
+
+    def test_image_smoke_timeout_never_repeats(self):
+        with mock.patch.object(GATE.subprocess,"run",side_effect=subprocess.TimeoutExpired("synthetic",1)) as call:
+            with self.assertRaisesRegex(RuntimeError,"COMMAND_OUTCOME_UNKNOWN"):
+                GATE.required_image_smoke(["synthetic"],1)
+            self.assertEqual(call.call_count,1)
 
     def test_image_test_transfer_timeout_never_repeats(self):
         with tempfile.TemporaryDirectory() as directory:

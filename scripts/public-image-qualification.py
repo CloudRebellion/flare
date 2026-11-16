@@ -30,6 +30,8 @@ REASON_CODES = frozenset({
     'IMAGE_TEST_BINARY_BOUND',
     'IMAGE_TEST_TRANSFER',
     'IMAGE_TEST_HASH',
+    'IMAGE_TEST_EXECUTION_DENIED',
+    'IMAGE_TEST_FAILED',
     'ARCHIVE_BOUND',
     'ARCHIVE_DEADLINE',
     'ARCHIVE_FAILED',
@@ -173,6 +175,39 @@ def archive(image, path, limit=MAX_ARTIFACT-MAX_METADATA):
         p.stdout.close()
 
 
+def required_image_smoke(args, timeout):
+    try:
+        result = subprocess.run(args, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise QualificationFailure("COMMAND_OUTCOME_UNKNOWN") from None
+    if len(result.stdout) > MAX_METADATA or len(result.stderr) > MAX_METADATA:
+        raise QualificationFailure("COMMAND_OUTPUT_BOUND")
+    if result.returncode:
+        # Only fixed public reason codes and test messages leave this process;
+        # raw Docker/app errors may include a fixture DSN and are never emitted.
+        allowed = {
+            "strict readiness or analytics unavailable; hot-only startup is not a pass",
+            "anonymous boundary request failed", "anonymous protected route was not denied",
+            "PG fixture open failed", "actual PostgreSQL16 required",
+            "synthetic cold fixture creation failed", "real DuckDB/PG attach failed",
+            "actual analytics query failed", "actual cold exporter failed",
+            "nonempty Parquet output required", "durable export ledger mismatch",
+            "fixture drop failed", "cold Parquet roundtrip failed",
+            "signed offline httpfs cache missing", "required image fixture inputs absent",
+        }
+        messages = []
+        for line in result.stdout.decode(errors="replace").splitlines():
+            match = re.match(r"\s*image_qualification_test\.go:[0-9]+: (.*)$", line)
+            if match and match[1] in allowed:
+                messages.append(match[1])
+        denied = b"permission denied" in result.stderr.lower()
+        code = "IMAGE_TEST_EXECUTION_DENIED" if denied else "IMAGE_TEST_FAILED"
+        print(json.dumps({"phase": PHASE, "reason_code": code,
+                          "test_exit": result.returncode, "fixed_test_messages": messages[:8]}), flush=True)
+        raise QualificationFailure(code)
+    return result.stdout
+
+
 def copy_image_test(app, source):
     # Docker's archive-copy path can reject a read-only rootfs even when the
     # target is a writable tmpfs. Transfer as the existing unprivileged process.
@@ -182,14 +217,14 @@ def copy_image_test(app, source):
         raise QualificationFailure("IMAGE_TEST_BINARY_BOUND")
     try:
         result = subprocess.run(["docker", "exec", "--interactive", "--user=1000:1000", app,
-            "/bin/sh", "-ceu", "umask 077; cat > /tmp/image-qualification.test; chmod 0700 /tmp/image-qualification.test"],
+            "/bin/sh", "-ceu", "umask 077; cat > /run/image-qualification/image-qualification.test; chmod 0700 /run/image-qualification/image-qualification.test"],
             input=raw, capture_output=True, timeout=45)
     except subprocess.TimeoutExpired:
         raise QualificationFailure("COMMAND_OUTCOME_UNKNOWN") from None
     if result.returncode:
         raise QualificationFailure("IMAGE_TEST_TRANSFER")
     actual = run(["docker", "exec", "--user=1000:1000", app,
-                  "sha256sum", "/tmp/image-qualification.test"]).decode().split()[0]
+                  "sha256sum", "/run/image-qualification/image-qualification.test"]).decode().split()[0]
     if actual != digest(raw):
         raise QualificationFailure("IMAGE_TEST_HASH")
 
@@ -257,7 +292,8 @@ def fixture(image, source, tools, output):
                    "GOMAXPROCS": "2", "GOMEMLIMIT": "512MiB"}
         args = ["--user=1000:1000", "--read-only", "--memory=2g", "--memory-swap=2g",
                 "--cpus=2", "--pids-limit=256", "--stop-timeout=30",
-                "--tmpfs=/tmp:rw,nosuid,nodev,uid=1000,gid=1000,mode=1777,size=268435456",
+                "--tmpfs=/tmp:rw,noexec,nosuid,nodev,uid=1000,gid=1000,mode=1777,size=268435456",
+                "--tmpfs=/run/image-qualification:rw,exec,nosuid,nodev,uid=1000,gid=1000,mode=0700,size=134217728",
                 "--tmpfs=/app/data:rw,nosuid,nodev,uid=1000,gid=1000,mode=0700,size=134217728"]
         for k, v in app_env.items():
             args.append("--env="+k+"="+v)
@@ -300,8 +336,8 @@ def fixture(image, source, tools, output):
         packages = run(["docker", "exec", app, "dpkg-query", "-W", "-f=${Package}\t${Version}\n"])
         save(output/"runtime-packages.txt", packages)
         PHASE = "RUN_REQUIRED_IMAGE_SMOKE"
-        test = run(["docker", "exec", "--user=1000:1000", "--env=FLARE_IMAGE_TEST_DATABASE_URL="+dsn,
-                    "--env=FLARE_IMAGE_EXPECTED_COMMIT="+source, app, "/tmp/image-qualification.test",
+        test = required_image_smoke(["docker", "exec", "--user=1000:1000", "--env=FLARE_IMAGE_TEST_DATABASE_URL="+dsn,
+                    "--env=FLARE_IMAGE_EXPECTED_COMMIT="+source, app, "/run/image-qualification/image-qualification.test",
                     "-test.v", "-test.run=^"+TEST+"$", "-test.timeout=180s"], 200)
         text = test.decode()
         if ("--- PASS: "+TEST not in text or "IMAGE_PG16_ANALYTICS_EXPORT_BOUNDARIES_PASSED" not in text or
