@@ -22,6 +22,17 @@ EXPECTED_EXTERNAL_SKIP = "first-party browser bridge wiring"
 STARTING_CHILD = False
 PENDING_SIGNAL = None
 REQUIRED = {
+    "github.com/bright-interaction/flare/internal/oidcprelink": {
+        "TestDecodeClosedRequest",
+        "TestReadFilePrivateRegularNoFollow",
+        "TestPostgresPrelink",
+        "TestRequestAndAuditOutputNeverContainRawSubject",
+    },
+    "github.com/bright-interaction/flare/cmd/oidc-prelink": {
+        "TestCLIRefusesUnknownArgumentsWithoutValues",
+        "TestCLIApplyNeedsAuthorityBeforeDatabase",
+        "TestCLIApplyPinsExactRequestBeforeDatabase",
+    },
     "github.com/bright-interaction/flare/internal/oidc": {
         "TestAssuranceMetadataDoesNotChangeGenericDiscovery",
         "TestGenericPublicIssuerPreservesCustomPortAndEscapedRealm",
@@ -248,7 +259,7 @@ def main():
         if summary:
             with open(summary, "a") as stream:
                 stream.write(
-                    "Product qualification passed: 42 mandatory top-level tests, "
+                    f"Product qualification passed: {sum(len(names) for names in REQUIRED.values())} mandatory top-level tests, "
                     "18 authentication API tests and seven real PostgreSQL groups; "
                     "zero actual Go test skips/failures. "
                     "Estate-wide sibling wiring is outside this public repository "
