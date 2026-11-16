@@ -22,3 +22,9 @@ bin
 data
 .git
 **/.git
+
+# Exclude generated frontend trees at any depth in reused product checkouts.
+**/.svelte-kit
+**/frontend/build
+**/frontend/source-maps
+**/cmd/server/frontend/build
