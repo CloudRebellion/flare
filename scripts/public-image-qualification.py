@@ -113,7 +113,10 @@ def save(path, raw):
 
 
 def inspect(kind, name):
-    return json.loads(run(["docker", kind, "inspect", name]))[0]
+    args = ["docker", kind, "inspect"]
+    if kind == "image":
+        args.append("--platform=linux/amd64")
+    return json.loads(run(args+[name]))[0]
 
 
 def image_metadata(v, source):
@@ -239,7 +242,7 @@ def fixture(image, source, tools, output):
     result = {"status": "failed", "fixture_id": request, "known_helpers_absent": False}
 
     def create(name, arguments, expected):
-        cid = run(["docker", "create", "--rm", "--pull=never", "--name", name,
+        cid = run(["docker", "create", "--rm", "--pull=never", "--platform=linux/amd64", "--name", name,
                    "--label", label, "--network", network, "--cap-drop=ALL",
                    "--security-opt=no-new-privileges", *arguments]).decode().strip()
         if not re.fullmatch(r"[0-9a-f]{64}", cid):
@@ -271,7 +274,7 @@ def fixture(image, source, tools, output):
             "--tmpfs=/var/run/postgresql:rw,nosuid,nodev,uid=70,gid=70,mode=0755,size=16777216",
             "--tmpfs=/tmp:rw,nosuid,nodev,uid=70,gid=70,mode=1777,size=16777216",
             "--env=POSTGRES_USER=flare", "--env=POSTGRES_DB=flare",
-            "--env=POSTGRES_PASSWORD="+password, PG], pg_image["Id"])
+            "--env=POSTGRES_PASSWORD="+password, pg_image["Id"]], pg_image["Id"])
         PHASE = "START_PG16"
         run(["docker", "start", pg])
         PHASE = "WAIT_PG16_TCP"
