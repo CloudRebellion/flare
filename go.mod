@@ -14,6 +14,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.19.0
 	github.com/getsentry/sentry-go v0.47.0
 	github.com/go-chi/chi/v5 v5.3.0
+	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible
 	github.com/gorilla/csrf v1.7.3
 	github.com/jackc/pgx/v5 v5.9.2
@@ -34,7 +35,6 @@ require (
 	github.com/duckdb/duckdb-go-bindings/linux-amd64 v0.1.21 // indirect
 	github.com/duckdb/duckdb-go-bindings/linux-arm64 v0.1.21 // indirect
 	github.com/duckdb/duckdb-go-bindings/windows-amd64 v0.1.21 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
