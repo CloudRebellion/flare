@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -77,6 +78,37 @@ class Controls(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "ARCHIVE_BOUND"):
                 GATE.archive("synthetic", p, limit=32)
             self.assertLessEqual(p.stat().st_size, 32)
+
+    def test_image_test_transfer_real_binary_bytes_and_permissions(self):
+        original = subprocess.run
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory)/"input"
+            target = pathlib.Path(directory)/"output"
+            raw = b"ELF\x00\xff\n"*1024
+            source.write_bytes(raw)
+            def transport(args, **kwargs):
+                self.assertEqual(args[:5], ["docker", "exec", "--interactive", "--user=1000:1000", "owned"])
+                self.assertEqual(args[5:7], ["/bin/sh", "-ceu"])
+                script = args[7].replace("/tmp/image-qualification.test", shlex.quote(str(target)))
+                return original(["/bin/sh", "-ceu", script], **kwargs)
+            def installed_hash(args):
+                return (GATE.digest(target.read_bytes())+"  /tmp/image-qualification.test\n").encode()
+            with mock.patch.object(GATE.subprocess, "run", side_effect=transport), mock.patch.object(GATE, "run", side_effect=installed_hash):
+                GATE.copy_image_test("owned", source)
+            self.assertEqual(target.read_bytes(), raw)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+            with mock.patch.object(GATE.subprocess, "run", side_effect=transport), mock.patch.object(GATE, "run", return_value=b"wrong  path"):
+                with self.assertRaisesRegex(RuntimeError, "IMAGE_TEST_HASH"):
+                    GATE.copy_image_test("owned", source)
+
+    def test_image_test_transfer_timeout_never_repeats(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory)/"input"
+            source.write_bytes(b"synthetic")
+            with mock.patch.object(GATE.subprocess, "run", side_effect=subprocess.TimeoutExpired("synthetic",45)) as call:
+                with self.assertRaisesRegex(RuntimeError,"COMMAND_OUTCOME_UNKNOWN"):
+                    GATE.copy_image_test("owned",source)
+                self.assertEqual(call.call_count,1)
 
     def test_command_timeout_is_unknown_and_never_retried(self):
         with mock.patch.object(GATE.subprocess, "run", side_effect=subprocess.TimeoutExpired("synthetic", 1)) as call:

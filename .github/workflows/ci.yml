@@ -74,8 +74,7 @@ jobs:
         run: python3 scripts/public-browser-qualification.py --output-dir "$RUNNER_TEMP/flare-browser-qualification"
 
   image-qualification:
-    # This is an additional gate; every existing product/browser gate remains.
-    needs: build-test
+    # Independent source and image gates run in parallel; both must pass.
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:

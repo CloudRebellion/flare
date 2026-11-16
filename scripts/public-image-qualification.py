@@ -26,6 +26,10 @@ REASON_CODES = frozenset({
     'ACTUAL_BINARY_MISMATCH',
     'ACTUAL_COMPILER_OR_CGO',
     'ACTUAL_KERNEL_PRINCIPAL',
+    'APP_NOT_RUNNING',
+    'IMAGE_TEST_BINARY_BOUND',
+    'IMAGE_TEST_TRANSFER',
+    'IMAGE_TEST_HASH',
     'ARCHIVE_BOUND',
     'ARCHIVE_DEADLINE',
     'ARCHIVE_FAILED',
@@ -169,6 +173,27 @@ def archive(image, path, limit=MAX_ARTIFACT-MAX_METADATA):
         p.stdout.close()
 
 
+def copy_image_test(app, source):
+    # Docker's archive-copy path can reject a read-only rootfs even when the
+    # target is a writable tmpfs. Transfer as the existing unprivileged process.
+    with source.open("rb") as stream:
+        raw = stream.read((128 << 20) + 1)
+    if not raw or len(raw) > 128 << 20:
+        raise QualificationFailure("IMAGE_TEST_BINARY_BOUND")
+    try:
+        result = subprocess.run(["docker", "exec", "--interactive", "--user=1000:1000", app,
+            "/bin/sh", "-ceu", "umask 077; cat > /tmp/image-qualification.test; chmod 0700 /tmp/image-qualification.test"],
+            input=raw, capture_output=True, timeout=45)
+    except subprocess.TimeoutExpired:
+        raise QualificationFailure("COMMAND_OUTCOME_UNKNOWN") from None
+    if result.returncode:
+        raise QualificationFailure("IMAGE_TEST_TRANSFER")
+    actual = run(["docker", "exec", "--user=1000:1000", app,
+                  "sha256sum", "/tmp/image-qualification.test"]).decode().split()[0]
+    if actual != digest(raw):
+        raise QualificationFailure("IMAGE_TEST_HASH")
+
+
 def fixture(image, source, tools, output):
     global PHASE
     request = uuid.uuid4().hex
@@ -243,7 +268,10 @@ def fixture(image, source, tools, output):
         PHASE = "START_APP"
         run(["docker", "start", app])
         PHASE = "COPY_IMAGE_TEST"
-        run(["docker", "cp", str(tools/"image-qualification.test"), app+":/tmp/image-qualification.test"])
+        state = inspect("container", app)["State"]
+        if not state["Running"] or state.get("OOMKilled"):
+            raise QualificationFailure("APP_NOT_RUNNING")
+        copy_image_test(app, tools/"image-qualification.test")
         PHASE = "VERIFY_FIXTURE_ISOLATION"
         for cid in (pg, app):
             v = inspect("container", cid)

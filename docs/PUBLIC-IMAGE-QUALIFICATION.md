@@ -65,3 +65,7 @@ the compressed download and decompressed file, rejects HTTPS downgrades and
 foreign redirects, then requires DuckDB's signed local INSTALL/LOAD before the
 remaining HTTPS extension installation. This avoids needing `httpfs` to download
 itself. Unsigned extensions remain disabled.
+
+The disposable test executable is streamed through `docker exec` as UID 1000
+into the container’s writable `/tmp` tmpfs and hash-checked before execution.
+The distributable root filesystem stays read-only and contains no test binary.
