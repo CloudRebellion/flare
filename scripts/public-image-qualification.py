@@ -119,6 +119,29 @@ def inspect(kind, name):
     return json.loads(run(args+[name]))[0]
 
 
+def pull_pg16():
+    run(["docker", "pull", "--platform=linux/amd64", PG], 180, visible=True)
+    selected = inspect("image", PG)
+    descriptor = selected.get("Descriptor")
+    if ((selected.get("Os"), selected.get("Architecture")) != ("linux", "amd64") or
+            not isinstance(descriptor, dict) or
+            not re.fullmatch(r"sha256:[0-9a-f]{64}", descriptor.get("digest", "")) or
+            descriptor.get("mediaType") not in (
+                "application/vnd.oci.image.manifest.v1+json",
+                "application/vnd.docker.distribution.manifest.v2+json")):
+        raise QualificationFailure("PG_PLATFORM")
+    # Docker's containerd store can inspect a selected platform's bare Id while
+    # refusing to create from that Id. Materialize the immutable named child,
+    # then prove it is exactly the platform image selected from the pinned index.
+    reference = "docker.io/library/postgres@"+descriptor["digest"]
+    run(["docker", "pull", "--platform=linux/amd64", reference], 180, visible=True)
+    actual = inspect("image", reference)
+    if any(actual.get(key) != selected.get(key)
+           for key in ("Id", "Os", "Architecture", "Descriptor")):
+        raise QualificationFailure("PG_PLATFORM")
+    return reference, actual
+
+
 def image_metadata(v, source):
     c = v["Config"]
     if (v["Os"], v["Architecture"]) != ("linux", "amd64") or c.get("Volumes"):
@@ -255,10 +278,7 @@ def fixture(image, source, tools, output):
 
     try:
         PHASE = "PULL_PG16"
-        run(["docker", "pull", "--platform=linux/amd64", PG], 180, visible=True)
-        pg_image = inspect("image", PG)
-        if (pg_image["Os"], pg_image["Architecture"]) != ("linux", "amd64"):
-            raise QualificationFailure("PG_PLATFORM")
+        pg_reference, pg_image = pull_pg16()
         PHASE = "CREATE_INTERNAL_NETWORK"
         run(["docker", "network", "create", "--internal", "--label", label, network])
         network_created = True
@@ -274,7 +294,7 @@ def fixture(image, source, tools, output):
             "--tmpfs=/var/run/postgresql:rw,nosuid,nodev,uid=70,gid=70,mode=0755,size=16777216",
             "--tmpfs=/tmp:rw,nosuid,nodev,uid=70,gid=70,mode=1777,size=16777216",
             "--env=POSTGRES_USER=flare", "--env=POSTGRES_DB=flare",
-            "--env=POSTGRES_PASSWORD="+password, pg_image["Id"]], pg_image["Id"])
+            "--env=POSTGRES_PASSWORD="+password, pg_reference], pg_image["Id"])
         PHASE = "START_PG16"
         run(["docker", "start", pg])
         PHASE = "WAIT_PG16_TCP"
@@ -347,6 +367,7 @@ def fixture(image, source, tools, output):
                 "--- SKIP:" in text or "--- FAIL:" in text):
             raise QualificationFailure("REQUIRED_IMAGE_TEST_NOT_PASSED")
         result.update(status="passed", actual_binary_sha256=sha, pg_image=pg_image["Id"],
+                      pg_image_reference=pg_reference,
                       internal_network_only=True, strict_readiness_and_analytics=True,
                       real_export_ledger_and_parquet_roundtrip=True, native_anonymous_boundaries=True,
                       actual_test_output_sha256=digest(test), image_test_skips=0,

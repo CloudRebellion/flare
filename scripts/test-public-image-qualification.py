@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Control regressions only. These never claim Docker/native qualification."""
 import contextlib
+import copy
 import importlib.util
 import io
 import pathlib
@@ -24,6 +25,80 @@ class Controls(unittest.TestCase):
                 "RootFS": {"Layers": ["sha256:"+"b"*64]},
                 "Config": {"User": "flare", "Labels": {"org.opencontainers.image.revision": "c"*40,
                 "org.opencontainers.image.version": "test"}}}
+
+    def pg_image(self):
+        image = self.image()
+        image["Descriptor"] = {"digest": "sha256:"+"e"*64,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json", "size": 1234}
+        return image
+
+    def test_pg_named_child_pull_and_create_use_selected_platform_identity(self):
+        selected = self.pg_image()
+        reference = "docker.io/library/postgres@"+selected["Descriptor"]["digest"]
+        cid = "f"*64
+        calls = []
+
+        def command(args, *unused, **kwargs):
+            calls.append(args)
+            if args[:2] == ["docker", "create"]:
+                self.assertEqual(args[-1], reference)
+                self.assertIn("--pull=never", args)
+                self.assertIn("--platform=linux/amd64", args)
+                return cid.encode()
+            if args[:2] == ["docker", "start"]:
+                raise GATE.QualificationFailure("PG_NOT_READY")
+            return b""
+
+        def metadata(kind, name):
+            if kind == "image":
+                self.assertIn(name, (GATE.PG, reference))
+                return copy.deepcopy(selected)
+            if kind == "network":
+                return {"Internal": True}
+            if kind == "container":
+                created = next(args for args in calls if args[:2] == ["docker", "create"])
+                request = created[created.index("--label")+1].split("=", 1)[1]
+                return {"Image": selected["Id"],
+                        "Config": {"Labels": {"flare.image-qualification": request}}}
+            self.fail("unexpected inspect kind")
+
+        absent = subprocess.CompletedProcess([], 1, b"", b"")
+        empty = subprocess.CompletedProcess([], 0, b"", b"")
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(GATE, "run", side_effect=command), \
+                    mock.patch.object(GATE, "inspect", side_effect=metadata), \
+                    mock.patch.object(GATE.subprocess, "run", side_effect=[absent, empty]):
+                # Stop the mocked flow at the first start command. Passing the
+                # real create guard proves its expected Image remains the Id,
+                # while the create reference itself is the named child digest.
+                with self.assertRaisesRegex(RuntimeError, "PG_NOT_READY"):
+                    GATE.fixture("runtime-image-untouched", "c"*40,
+                                 pathlib.Path(directory), pathlib.Path(directory))
+        pulls = [args for args in calls if args[:2] == ["docker", "pull"]]
+        self.assertEqual(pulls, [["docker", "pull", "--platform=linux/amd64", GATE.PG],
+                                ["docker", "pull", "--platform=linux/amd64", reference]])
+        self.assertEqual(sum(args[:2] == ["docker", "create"] for args in calls), 1)
+        self.assertEqual([args for args in calls if args[:2] == ["docker", "start"]],
+                         [["docker", "start", cid]])
+
+    def test_pg_named_child_identity_drift_refuses_before_fixture_creation(self):
+        selected = self.pg_image()
+        variants = []
+        for key, value in (("Id", "sha256:"+"0"*64), ("Architecture", "arm64"),
+                           ("Os", "windows"),
+                           ("Descriptor", {**selected["Descriptor"], "size": 1235})):
+            changed = copy.deepcopy(selected)
+            changed[key] = value
+            variants.append(changed)
+        for changed in variants:
+            with self.subTest(changed=changed):
+                with mock.patch.object(GATE, "run") as command, \
+                        mock.patch.object(GATE, "inspect", side_effect=[selected, changed]):
+                    with self.assertRaisesRegex(RuntimeError, "PG_PLATFORM"):
+                        GATE.pull_pg16()
+                self.assertEqual(command.call_count, 2)
+                self.assertTrue(all(call.args[0][:2] == ["docker", "pull"]
+                                    for call in command.call_args_list))
 
     def test_exact_image_and_nonroot(self):
         self.assertEqual(GATE.image_metadata(self.image(), "c"*40)["architecture"], "amd64")
